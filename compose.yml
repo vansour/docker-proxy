@@ -1,0 +1,9 @@
+services:
+  docker-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: docker-proxy
+    ports:
+      - "8081:8081"
+    restart: unless-stopped

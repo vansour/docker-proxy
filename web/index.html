@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Docker 加速器生成器</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Docker 加速器链接生成器</h1>
+      <p>在下面输入镜像名（支持带 registry 前缀，例如 <code>ghcr.io/vansour/gh-proxy:latest</code>），生成通过代理的拉取命令与 API 链接。</p>
+
+      <label for="image-input">镜像名</label>
+      <div class="input-row">
+        <input id="image-input" placeholder="例如：ubuntu:latest 或 ghcr.io/vansour/gh-proxy:latest" />
+        <button id="gen-btn">生成</button>
+      </div>
+
+      <section id="results" class="hidden">
+        <h2>生成结果</h2>
+
+        <div class="result-block">
+          <h3>docker pull</h3>
+          <pre id="pull-cmd"></pre>
+          <button class="copy-btn" data-target="pull-cmd">复制</button>
+        </div>
+
+        <div class="result-block">
+          <h3>/v2/ 探针</h3>
+          <pre id="v2-url"></pre>
+          <button class="copy-btn" data-target="v2-url">复制</button>
+        </div>
+
+        <div class="result-block">
+          <h3>manifest URL</h3>
+          <pre id="manifest-url"></pre>
+          <button class="copy-btn" data-target="manifest-url">复制</button>
+        </div>
+
+        <div class="result-block">
+          <h3>curl 请求示例</h3>
+          <pre id="curl-examples"></pre>
+          <button class="copy-btn" data-target="curl-examples">复制</button>
+        </div>
+
+        <div class="note">注意：如果你的代理使用 HTTP（非 TLS），在 Docker 客户端中需要将代理域加入 `insecure-registries`。</div>
+      </section>
+
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
