@@ -3,24 +3,36 @@ use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response, Redirect},
+    response::{Html, IntoResponse, Response},
     routing::{get, head, post, put},
     Router,
 };
+use bytes::Bytes;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info};
-use bytes::Bytes;
 
+mod config;
+mod log;
 mod proxy;
+use config::Config;
+use log::{init_logger, init_logger_console};
 use proxy::DockerProxy;
 
 #[tokio::main]
 async fn main() {
-    // 初始化日志
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    // Load configuration
+    let config = Config::from_file("/config/config.toml")
+        .or_else(|_| Config::from_file("./config/config.toml"))
+        .expect("Failed to load configuration");
+
+    // Initialize logger based on configuration
+    init_logger(config.log_file_path(), &config.log_level_normalized())
+        .or_else(|_| init_logger_console(&config.log_level_normalized()))
+        .expect("Failed to initialize logger");
+
+    info!("Docker Registry Proxy starting");
+    info!("Configuration: {}", config.to_display_string());
 
     let proxy = Arc::new(DockerProxy::new());
 
@@ -28,26 +40,29 @@ async fn main() {
     let app = Router::new()
         // health check endpoint
         .route("/healthz", get(healthz))
-    // static web files served at root (handler below). API routes (/v2/*) are registered earlier.
-    .route("/*file", get(serve_static))
-    // serve web UI at root without redirect
-    .route("/", get(serve_root))
-    // Docker Registry V2 API endpoints
-    .route("/v2/", get(handle_v2_check))
-    // wildcard dispatch for repository names that may contain slashes (e.g. ghcr.io/owner/repo)
-    .route("/v2/*rest", get(v2_get))
-    .route("/v2/*rest", head(v2_head))
-    .route("/v2/*rest", post(v2_post))
-    .route("/v2/*rest", put(v2_put))
+        // static web files served at root (handler below). API routes (/v2/*) are registered earlier.
+        .route("/*file", get(serve_static))
+        // serve web UI at root without redirect
+        .route("/", get(serve_root))
+        // Docker Registry V2 API endpoints
+        .route("/v2/", get(handle_v2_check))
+        // wildcard dispatch for repository names that may contain slashes (e.g. ghcr.io/owner/repo)
+        .route("/v2/*rest", get(v2_get))
+        .route("/v2/*rest", head(v2_head))
+        .route("/v2/*rest", post(v2_post))
+        .route("/v2/*rest", put(v2_put))
         .layer(middleware::from_fn(log_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(proxy);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8081")
+    let listener = tokio::net::TcpListener::bind(config.server_addr())
         .await
-        .expect("Failed to bind to port 8081");
+        .expect("Failed to bind to address");
 
-    info!("Docker Registry Proxy listening on http://0.0.0.0:8081");
+    info!(
+        "Docker Registry Proxy listening on http://{}",
+        config.server_addr()
+    );
 
     axum::serve(listener, app).await.expect("Server error");
 }
@@ -71,8 +86,9 @@ async fn handle_v2_check() -> impl IntoResponse {
 }
 
 // 简单的根页面，返回一段 HTML 带镜像加速器工具
+#[allow(dead_code)]
 async fn root_index() -> impl IntoResponse {
-        let html = r#"
+    let _html = r#"
 <!doctype html>
 <html lang="zh-CN">
     <head>
@@ -159,13 +175,21 @@ async fn root_index() -> impl IntoResponse {
 "#;
 
     // legacy root_index kept for reference but not used (root now redirects to /web/)
-    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], Html(""))
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        Html(""),
+    )
 }
 
 // 健康检查：简单返回 JSON {"status":"ok"}
 async fn healthz() -> impl IntoResponse {
-        let body = r#"{"status":"ok"}"#;
-        (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], body)
+    let body = r#"{"status":"ok"}"#;
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
 }
 
 // 获取镜像manifest
@@ -308,17 +332,28 @@ async fn serve_static(Path(file): Path<String>) -> impl IntoResponse {
     match tokio::fs::read(&full).await {
         Ok(bytes) => {
             let content = Bytes::from(bytes);
-            let ctype = if path.ends_with(".html") { "text/html; charset=utf-8" }
-            else if path.ends_with(".js") { "application/javascript" }
-            else if path.ends_with(".css") { "text/css" }
-            else if path.ends_with(".svg") { "image/svg+xml" }
-            else if path.ends_with(".png") { "image/png" }
-            else if path.ends_with(".jpg") || path.ends_with(".jpeg") { "image/jpeg" }
-            else { "application/octet-stream" };
+            let ctype = if path.ends_with(".html") {
+                "text/html; charset=utf-8"
+            } else if path.ends_with(".js") {
+                "application/javascript"
+            } else if path.ends_with(".css") {
+                "text/css"
+            } else if path.ends_with(".svg") {
+                "image/svg+xml"
+            } else if path.ends_with(".png") {
+                "image/png"
+            } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+                "image/jpeg"
+            } else {
+                "application/octet-stream"
+            };
 
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, ctype.parse().unwrap());
-            headers.insert(header::CONTENT_LENGTH, content.len().to_string().parse().unwrap());
+            headers.insert(
+                header::CONTENT_LENGTH,
+                content.len().to_string().parse().unwrap(),
+            );
             (StatusCode::OK, headers, content).into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, "Not Found").into_response(),
@@ -332,8 +367,14 @@ async fn serve_root() -> impl IntoResponse {
         Ok(bytes) => {
             let content = Bytes::from(bytes);
             let mut headers = HeaderMap::new();
-            headers.insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
-            headers.insert(header::CONTENT_LENGTH, content.len().to_string().parse().unwrap());
+            headers.insert(
+                header::CONTENT_TYPE,
+                "text/html; charset=utf-8".parse().unwrap(),
+            );
+            headers.insert(
+                header::CONTENT_LENGTH,
+                content.len().to_string().parse().unwrap(),
+            );
             (StatusCode::OK, headers, content).into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, "Not Found").into_response(),
@@ -341,10 +382,7 @@ async fn serve_root() -> impl IntoResponse {
 }
 
 // Wildcard dispatch handlers for /v2/*rest to support repository names containing '/'
-async fn v2_get(
-    State(proxy): State<Arc<DockerProxy>>,
-    Path(rest): Path<String>,
-) -> Response {
+async fn v2_get(State(proxy): State<Arc<DockerProxy>>, Path(rest): Path<String>) -> Response {
     // rest is the path after /v2/, e.g. "ghcr.io/vansour/gh-proxy/manifests/latest"
     let parts: Vec<&str> = rest.split('/').collect();
     // look for "manifests" segment
@@ -369,10 +407,7 @@ async fn v2_get(
     (StatusCode::NOT_FOUND, "Not Found").into_response()
 }
 
-async fn v2_head(
-    State(proxy): State<Arc<DockerProxy>>,
-    Path(rest): Path<String>,
-) -> Response {
+async fn v2_head(State(proxy): State<Arc<DockerProxy>>, Path(rest): Path<String>) -> Response {
     let parts: Vec<&str> = rest.split('/').collect();
     if let Some(i) = parts.iter().position(|&p| p == "manifests") {
         if i + 1 < parts.len() {
@@ -392,24 +427,18 @@ async fn v2_head(
     (StatusCode::NOT_FOUND, "Not Found").into_response()
 }
 
-async fn v2_post(
-    State(proxy): State<Arc<DockerProxy>>,
-    Path(rest): Path<String>,
-) -> Response {
+async fn v2_post(State(proxy): State<Arc<DockerProxy>>, Path(rest): Path<String>) -> Response {
     let parts: Vec<&str> = rest.split('/').collect();
     // blobs uploads: .../blobs/uploads/
-        if parts.len() >= 2 && parts.ends_with(&["blobs", "uploads"]) {
-            let name = parts[..parts.len() - 2].join("/");
-            let resp = initiate_blob_upload(State(proxy), Path(name)).await;
-            return resp;
+    if parts.len() >= 2 && parts.ends_with(&["blobs", "uploads"]) {
+        let name = parts[..parts.len() - 2].join("/");
+        let resp = initiate_blob_upload(State(proxy), Path(name)).await;
+        return resp;
     }
     (StatusCode::NOT_FOUND, "Not Found").into_response()
 }
 
-async fn v2_put(
-    State(proxy): State<Arc<DockerProxy>>,
-    Path(rest): Path<String>,
-) -> Response {
+async fn v2_put(State(_proxy): State<Arc<DockerProxy>>, Path(rest): Path<String>) -> Response {
     let parts: Vec<&str> = rest.split('/').collect();
     // complete upload: .../blobs/uploads/:uuid
     if parts.len() >= 3 && parts[parts.len() - 2] == "uploads" {

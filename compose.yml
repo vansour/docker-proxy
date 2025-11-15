@@ -1,9 +1,10 @@
 services:
   docker-proxy:
+    image: ghcr.io/vansour/docker-proxy:latest
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.debian
     container_name: docker-proxy
     ports:
-      - "8081:8081"
+      - "8080:8080"
     restart: unless-stopped

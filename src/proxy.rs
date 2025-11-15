@@ -1,11 +1,9 @@
+use bytes::Bytes;
+use reqwest::Method;
+use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use tracing::info;
 use uuid::Uuid;
-use reqwest::Method;
-use std::collections::HashMap;
-use serde_json::Value as JsonValue;
-use bytes::Bytes;
-
-
 
 pub struct DockerProxy {
     client: reqwest::Client,
@@ -35,11 +33,16 @@ impl DockerProxy {
             .fetch_with_auth(
                 Method::GET,
                 &url,
-                Some(vec![(
-                    "Accept",
-                    "application/vnd.docker.distribution.manifest.v2+json",
-                ),
-                ("Accept", "application/vnd.docker.distribution.manifest.list.v2+json")]),
+                Some(vec![
+                    (
+                        "Accept",
+                        "application/vnd.docker.distribution.manifest.v2+json",
+                    ),
+                    (
+                        "Accept",
+                        "application/vnd.docker.distribution.manifest.list.v2+json",
+                    ),
+                ]),
             )
             .await
             .map_err(|e| format!("Failed to fetch manifest: {}", e))?;
@@ -173,7 +176,10 @@ impl DockerProxy {
             }
         }
 
-        let resp = req.send().await.map_err(|e| format!("request error: {}", e))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("request error: {}", e))?;
         if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
             return Ok(resp);
         }
@@ -185,7 +191,7 @@ impl DockerProxy {
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| "Unauthorized and missing WWW-Authenticate header".to_string())?;
 
-    let params = Self::parse_www_authenticate(www);
+        let params = Self::parse_www_authenticate(www);
         let realm = params
             .get("realm")
             .ok_or_else(|| "WWW-Authenticate missing realm".to_string())?;
@@ -256,30 +262,29 @@ impl DockerProxy {
         (self.registry_url.clone(), self.normalize_image_name(name))
     }
 
-
-// parse header like: Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/ubuntu:pull"
-fn parse_www_authenticate(s: &str) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    // find the part after the auth scheme (e.g., "Bearer ")
-    let parts: Vec<&str> = s.splitn(2, ' ').collect();
-    if parts.len() < 2 {
-        return out;
-    }
-    let params_part = parts[1];
-    for pair in params_part.split(',') {
-        let kv: Vec<&str> = pair.splitn(2, '=').collect();
-        if kv.len() != 2 {
-            continue;
+    // parse header like: Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/ubuntu:pull"
+    fn parse_www_authenticate(s: &str) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        // find the part after the auth scheme (e.g., "Bearer ")
+        let parts: Vec<&str> = s.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            return out;
         }
-        let key = kv[0].trim().trim_matches(',').trim().to_string();
-        let mut val = kv[1].trim().to_string();
-        if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
-            val = val[1..val.len() - 1].to_string();
+        let params_part = parts[1];
+        for pair in params_part.split(',') {
+            let kv: Vec<&str> = pair.splitn(2, '=').collect();
+            if kv.len() != 2 {
+                continue;
+            }
+            let key = kv[0].trim().trim_matches(',').trim().to_string();
+            let mut val = kv[1].trim().to_string();
+            if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
+                val = val[1..val.len() - 1].to_string();
+            }
+            out.insert(key, val);
         }
-        out.insert(key, val);
+        out
     }
-    out
-}
     // 规范化镜像名称：如果没有指定registry，默认使用library
     fn normalize_image_name(&self, name: &str) -> String {
         if name.contains('/') {

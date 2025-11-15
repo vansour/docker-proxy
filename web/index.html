@@ -1,54 +1,107 @@
-<!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Docker 加速器生成器</title>
-    <link rel="stylesheet" href="style.css" />
-  </head>
-  <body>
-    <main class="container">
-      <h1>Docker 加速器链接生成器</h1>
-      <p>在下面输入镜像名（支持带 registry 前缀，例如 <code>ghcr.io/vansour/gh-proxy:latest</code>），生成通过代理的拉取命令与 API 链接。</p>
+<!DOCTYPE html>
+<html lang="zh">
 
-      <label for="image-input">镜像名</label>
-      <div class="input-row">
-        <input id="image-input" placeholder="例如：ubuntu:latest 或 ghcr.io/vansour/gh-proxy:latest" />
-        <button id="gen-btn">生成</button>
-      </div>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub 文件加速</title>
+    
+    <!-- 预连接到字体服务器，加快后续请求 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    
+    <!-- 加载 Roboto 字体，使用 display=swap 确保字体加载前显示后备字体 -->
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    
+    <!-- 加载 Material Symbols 图标字体，使用 display=swap -->
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet">
+    
+    <!-- 本地样式表 -->
+    <link rel="stylesheet" href="style.css">
+</head>
 
-      <section id="results" class="hidden">
-        <h2>生成结果</h2>
+<body>
+    <div class="container">
+        <header class="app-bar">
+            <h1 class="app-bar__title">GitHub 文件加速</h1>
+        </header>
 
-        <div class="result-block">
-          <h3>docker pull</h3>
-          <pre id="pull-cmd"></pre>
-          <button class="copy-btn" data-target="pull-cmd">复制</button>
-        </div>
+        <main class="content">
+            <div class="card input-card">
+                <form id="github-form" class="input-card__form">
+                    <div class="text-field">
+                        <input type="text" class="text-field__input" id="githubLinkInput" placeholder="请在此处输入 GitHub 链接">
+                        <button type="button" class="text-field__clear-button" id="clearInputButton" title="清空输入框">
+                            <span class="material-symbols-outlined">close</span>
+                        </button>
+                        <div class="text-field__error" id="githubLinkError"></div>
+                    </div>
 
-        <div class="result-block">
-          <h3>/v2/ 探针</h3>
-          <pre id="v2-url"></pre>
-          <button class="copy-btn" data-target="v2-url">复制</button>
-        </div>
+                    <div class="format-selector">
+                        <label class="format-selector__label">选择输出格式:</label>
+                        <div id="format-toggle" class="segmented-control">
+                            <div class="segmented-control__slider"></div>
+                            <button type="button" class="segmented-control__button active" data-value="direct">直接链接</button>
+                            <button type="button" class="segmented-control__button" data-value="git">Git Clone</button>
+                            <button type="button" class="segmented-control__button" data-value="wget">Wget</button>
+                            <button type="button" class="segmented-control__button" data-value="curl">Curl</button>
+                        </div>
+                    </div>
 
-        <div class="result-block">
-          <h3>manifest URL</h3>
-          <pre id="manifest-url"></pre>
-          <button class="copy-btn" data-target="manifest-url">复制</button>
-        </div>
+                    <button type="submit" class="button button--filled">
+                        <span class="material-symbols-outlined">link</span>
+                        生成链接
+                    </button>
+                </form>
 
-        <div class="result-block">
-          <h3>curl 请求示例</h3>
-          <pre id="curl-examples"></pre>
-          <button class="copy-btn" data-target="curl-examples">复制</button>
-        </div>
+                <div id="output" class="output-area" style="display: none;">
+                    <pre id="formattedLinkOutput" class="output-area__pre"></pre>
+                    <div class="output-area__actions">
+                        <button id="copyButton" class="button button--icon" title="复制链接">
+                            <span class="material-symbols-outlined">content_copy</span>
+                        </button>
+                        <button id="openButton" class="button button--icon" title="在新标签页中打开">
+                            <span class="material-symbols-outlined">open_in_new</span>
+                        </button>
+                    </div>
+                </div>
+                <p class="helper-text">全面支持 Release、Archive、API、文件及 Git 仓库链接的转换。</p>
+            </div>
 
-        <div class="note">注意：如果你的代理使用 HTTP（非 TLS），在 Docker 客户端中需要将代理域加入 `insecure-registries`。</div>
-      </section>
+            <div class="status-cards">
+                <div class="card info-card">
+                    <span class="material-symbols-outlined info-card__icon">download</span>
+                    <h2 class="info-card__title">文件大小限制</h2>
+                    <p class="info-card__text" id="sizeLimitDisplay">...</p>
+                </div>
+                <div class="card info-card">
+                    <span class="material-symbols-outlined info-card__icon">block</span>
+                    <h2 class="info-card__title">黑名单状态</h2>
+                    <p class="info-card__text" id="blackListStatus">...</p>
+                </div>
+                <div class="card info-card">
+                    <span class="material-symbols-outlined info-card__icon">terminal</span>
+                    <h2 class="info-card__title">Shell Nest 状态</h2>
+                    <p class="info-card__text" id="shellNestStatus">...</p>
+                </div>
+            </div>
+        </main>
 
-    </main>
+        <footer class="footer">
+            <p>
+                Copyright © 2024-<script>document.write(new Date().getFullYear());</script> vansour<br>
+                <a href="https://github.com/vansour/gh-proxy">GitHub 仓库</a>
+            </p>
+        </footer>
+    </div>
 
-    <script src="app.js"></script>
-  </body>
+    <div class="toast" id="toast">
+        <div class="toast__message" id="toastMessage"></div>
+    </div>
+
+    <!-- 版本信息（右下角），将由前端从 /healthz 获取并注入 -->
+    <div class="version-badge" id="versionBadge" title="版本：获取中">v…</div>
+
+    <script src="script.js"></script>
+</body>
 </html>
