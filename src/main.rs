@@ -47,6 +47,8 @@ async fn main() {
     let app = Router::new()
         // health check endpoint
         .route("/healthz", get(healthz))
+        // 调试：查看 manifest size vs 实际 blob 大小
+        .route("/debug/blob-info", get(debug_blob_info))
         // static web files served at root (handler below). API routes (/v2/*) are registered earlier.
         .route("/*file", get(serve_static))
         // serve web UI at root without redirect
@@ -195,6 +197,77 @@ async fn healthz(State(proxy): State<Arc<DockerProxy>>) -> impl IntoResponse {
     )
 }
 
+// 调试接口：返回 manifest 中的 layer size 与实际 blob 大小
+// 调用示例：
+//   /debug/blob-info?name=library/debian&reference=latest&digest=sha256:...
+async fn debug_blob_info(
+    State(proxy): State<Arc<DockerProxy>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    use serde_json::json;
+
+    let name = match params.get("name") {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "missing 'name' query parameter",
+            )
+                .into_response();
+        }
+    };
+
+    let digest = match params.get("digest") {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "missing 'digest' query parameter",
+            )
+                .into_response();
+        }
+    };
+
+    let reference = params
+        .get("reference")
+        .cloned()
+        .unwrap_or_else(|| "latest".to_string());
+
+    match proxy
+        .debug_blob_info(&name, &digest, &reference)
+        .await
+    {
+        Ok((manifest_size, actual_size)) => {
+            let body = json!({
+                "name": name,
+                "reference": reference,
+                "digest": digest,
+                "manifest_size": manifest_size,
+                "actual_blob_size": actual_size,
+                "size_diff": (actual_size as i64 - manifest_size as i64),
+            })
+            .to_string();
+
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("debug_blob_info error: {}", e);
+            let status = match e {
+                error::ProxyError::ManifestNotFound { .. } => StatusCode::NOT_FOUND,
+                error::ProxyError::BlobNotFound { .. } => StatusCode::NOT_FOUND,
+                error::ProxyError::AuthenticationFailed(_) => StatusCode::UNAUTHORIZED,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            (status, format!("debug error: {}", e)).into_response()
+        }
+    }
+}
+
 // 获取镜像manifest
 async fn get_manifest(
     State(proxy): State<Arc<DockerProxy>>,
@@ -297,12 +370,8 @@ async fn get_blob(
         }
         Err(e) => {
             tracing::error!("Error getting blob: {}", e);
-            let status = match e {
-                error::ProxyError::BlobNotFound { .. } => StatusCode::NOT_FOUND,
-                error::ProxyError::AuthenticationFailed(_) => StatusCode::UNAUTHORIZED,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (status, format!("Error: {}", e)).into_response()
+            // 对于代理内部错误，返回 502，避免被 Docker 误认为是正常 blob
+            (StatusCode::BAD_GATEWAY, format!("Upstream blob error: {}", e)).into_response()
         }
     }
 }

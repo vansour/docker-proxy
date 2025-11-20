@@ -144,13 +144,7 @@ impl DockerProxy {
 
         let response = self.fetch_with_auth(Method::GET, &url, None).await?;
 
-        if !response.status().is_success() {
-            return Err(ProxyError::BlobNotFound {
-                status: response.status(),
-            });
-        }
-
-        // 直接返回上游响应，由上层负责流式转发
+        // 始终返回上游响应，由上层根据状态码决定如何处理
         Ok(response)
     }
 
@@ -181,6 +175,84 @@ impl DockerProxy {
             .unwrap_or(0);
 
         Ok(content_length)
+    }
+
+    /// 调试用：获取指定镜像+digest 的 manifest size 和实际 blob 大小
+    pub async fn debug_blob_info(
+        &self,
+        name: &str,
+        digest: &str,
+        reference: &str,
+    ) -> ProxyResult<(u64, u64)> {
+        // 1. 获取 manifest（v2 schema）并解析 size
+        let (registry_url, image_name) = self.split_registry_and_name(name);
+        let manifest_url = format!("{}/v2/{}/manifests/{}", registry_url, image_name, reference);
+
+        let manifest_resp = self
+            .fetch_with_auth(
+                Method::GET,
+                &manifest_url,
+                Some(vec![
+                    (
+                        "Accept",
+                        "application/vnd.docker.distribution.manifest.v2+json",
+                    ),
+                    (
+                        "Accept",
+                        "application/vnd.docker.distribution.manifest.list.v2+json",
+                    ),
+                ]),
+            )
+            .await?;
+
+        if !manifest_resp.status().is_success() {
+            return Err(ProxyError::ManifestNotFound {
+                status: manifest_resp.status(),
+            });
+        }
+
+        let manifest_json: JsonValue = manifest_resp
+            .json()
+            .await
+            .map_err(|e| ProxyError::ResponseReadError(e.to_string()))?;
+
+        // manifest 可能是 manifest list，需要选中对应平台；简单起见先按普通 manifest 处理
+        let mut manifest_size: u64 = 0;
+        if let Some(layers) = manifest_json.get("layers").and_then(|v| v.as_array()) {
+            for layer in layers {
+                if let Some(d) = layer.get("digest").and_then(|v| v.as_str()) {
+                    if d == digest {
+                        if let Some(s) = layer.get("size").and_then(|v| v.as_u64()) {
+                            manifest_size = s;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 2. 获取 blob，统计实际字节数
+        let blob_url = format!("{}/v2/{}/blobs/{}", registry_url, image_name, digest);
+        let blob_resp = self
+            .fetch_with_auth(Method::GET, &blob_url, None)
+            .await?;
+
+        if !blob_resp.status().is_success() {
+            return Err(ProxyError::BlobNotFound {
+                status: blob_resp.status(),
+            });
+        }
+
+        let mut stream = blob_resp.bytes_stream();
+        let mut actual_size: u64 = 0;
+
+        use futures_util::StreamExt;
+        while let Some(chunk_result) = stream.next().await {
+            let bytes = chunk_result.map_err(ProxyError::Network)?;
+            actual_size += bytes.len() as u64;
+        }
+
+        Ok((manifest_size, actual_size))
     }
 
     pub async fn initiate_blob_upload(&self, _name: &str) -> ProxyResult<String> {
