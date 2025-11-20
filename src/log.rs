@@ -5,8 +5,13 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
+use tracing_appender::non_blocking::WorkerGuard;
+
 /// Logger initialization from config
-pub fn init_logger(log_file_path: &str, log_level: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn init_logger(
+    log_file_path: &str,
+    log_level: &str,
+) -> Result<Option<WorkerGuard>, Box<dyn std::error::Error>> {
     // Create log directory if it doesn't exist
     if let Some(parent) = Path::new(log_file_path).parent() {
         if !parent.as_os_str().is_empty() {
@@ -23,7 +28,7 @@ pub fn init_logger(log_file_path: &str, log_level: &str) -> Result<(), Box<dyn s
         .append(true)
         .open(log_file_path)?;
 
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file);
 
     // Create file layer with timestamp (JSON format)
     let file_layer = tracing_subscriber::fmt::layer()
@@ -55,11 +60,13 @@ pub fn init_logger(log_file_path: &str, log_level: &str) -> Result<(), Box<dyn s
         .with(console_layer)
         .init();
 
-    Ok(())
+    Ok(Some(guard))
 }
 
 /// Initialize logger with console output only (useful for development)
-pub fn init_logger_console(log_level: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn init_logger_console(
+    log_level: &str,
+) -> Result<Option<WorkerGuard>, Box<dyn std::error::Error>> {
     let level = parse_log_level(log_level);
 
     let env_filter = EnvFilter::try_from_default_env()
@@ -77,7 +84,7 @@ pub fn init_logger_console(log_level: &str) -> Result<(), Box<dyn std::error::Er
         )
         .init();
 
-    Ok(())
+    Ok(None)
 }
 
 /// Parse log level string to tracing Level

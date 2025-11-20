@@ -80,14 +80,6 @@ pub struct AuthConfig {
     pub ghcr_token: String,
 }
 
-impl AuthConfig {
-    /// Check if GHCR token is configured
-    #[allow(dead_code)]
-    pub fn has_ghcr_token(&self) -> bool {
-        !self.ghcr_token.is_empty()
-    }
-}
-
 /// Root configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -152,15 +144,8 @@ impl Config {
     }
 
     /// Get the GHCR authentication token
-    #[allow(dead_code)]
     pub fn ghcr_token(&self) -> &str {
         &self.auth.ghcr_token
-    }
-
-    /// Check if GHCR token is configured
-    #[allow(dead_code)]
-    pub fn has_ghcr_token(&self) -> bool {
-        self.auth.has_ghcr_token()
     }
 
     /// Convert to a display string with masked sensitive data

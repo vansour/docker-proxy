@@ -1,28 +1,32 @@
+use crate::config::Config;
+use crate::error::{ProxyError, ProxyResult};
 use bytes::Bytes;
 use reqwest::Method;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use tracing::info;
-use uuid::Uuid;
 
 pub struct DockerProxy {
     client: reqwest::Client,
     registry_url: String,
+    ghcr_token: String,
 }
 
 impl DockerProxy {
-    pub fn new() -> Self {
+    pub fn new(config: &Config) -> Self {
+        let mut registry_url = config.default_registry().to_string();
+        if !registry_url.starts_with("http") {
+            registry_url = format!("https://{}", registry_url);
+        }
+
         Self {
             client: reqwest::Client::new(),
-            registry_url: "https://registry-1.docker.io".to_string(),
+            registry_url,
+            ghcr_token: config.ghcr_token().to_string(),
         }
     }
 
-    pub async fn get_manifest(
-        &self,
-        name: &str,
-        reference: &str,
-    ) -> Result<(String, String), String> {
+    pub async fn get_manifest(&self, name: &str, reference: &str) -> ProxyResult<(String, String)> {
         // allow name to include a registry prefix (e.g. "ghcr.io/vansour/gh-proxy")
         let (registry_url, image_name) = self.split_registry_and_name(name);
         let url = format!("{}/v2/{}/manifests/{}", registry_url, image_name, reference);
@@ -44,11 +48,12 @@ impl DockerProxy {
                     ),
                 ]),
             )
-            .await
-            .map_err(|e| format!("Failed to fetch manifest: {}", e))?;
+            .await?;
 
         if !response.status().is_success() {
-            return Err(format!("Manifest not found: {}", response.status()));
+            return Err(ProxyError::ManifestNotFound {
+                status: response.status(),
+            });
         }
 
         let content_type = response
@@ -61,16 +66,12 @@ impl DockerProxy {
         let body = response
             .text()
             .await
-            .map_err(|e| format!("Failed to read response: {}", e))?;
+            .map_err(|e| ProxyError::ResponseReadError(e.to_string()))?;
 
         Ok((content_type, body))
     }
 
-    pub async fn head_manifest(
-        &self,
-        name: &str,
-        reference: &str,
-    ) -> Result<(String, u64), String> {
+    pub async fn head_manifest(&self, name: &str, reference: &str) -> ProxyResult<(String, u64)> {
         let (registry_url, image_name) = self.split_registry_and_name(name);
         let url = format!("{}/v2/{}/manifests/{}", registry_url, image_name, reference);
 
@@ -85,11 +86,12 @@ impl DockerProxy {
                     "application/vnd.docker.distribution.manifest.v2+json",
                 )]),
             )
-            .await
-            .map_err(|e| format!("Failed to HEAD manifest: {}", e))?;
+            .await?;
 
         if !response.status().is_success() {
-            return Err(format!("Manifest not found: {}", response.status()));
+            return Err(ProxyError::ManifestNotFound {
+                status: response.status(),
+            });
         }
 
         let content_type = response
@@ -109,42 +111,40 @@ impl DockerProxy {
         Ok((content_type, content_length))
     }
 
-    pub async fn get_blob(&self, name: &str, digest: &str) -> Result<Bytes, String> {
+    pub async fn get_blob(&self, name: &str, digest: &str) -> ProxyResult<Bytes> {
         let (registry_url, image_name) = self.split_registry_and_name(name);
         let url = format!("{}/v2/{}/blobs/{}", registry_url, image_name, digest);
 
         info!("Fetching blob from: {}", url);
 
-        let response = self
-            .fetch_with_auth(Method::GET, &url, None)
-            .await
-            .map_err(|e| format!("Failed to fetch blob: {}", e))?;
+        let response = self.fetch_with_auth(Method::GET, &url, None).await?;
 
         if !response.status().is_success() {
-            return Err(format!("Blob not found: {}", response.status()));
+            return Err(ProxyError::BlobNotFound {
+                status: response.status(),
+            });
         }
 
         let body = response
             .bytes()
             .await
-            .map_err(|e| format!("Failed to read blob bytes: {}", e))?;
+            .map_err(|e| ProxyError::ResponseReadError(e.to_string()))?;
 
         Ok(body)
     }
 
-    pub async fn head_blob(&self, name: &str, digest: &str) -> Result<u64, String> {
+    pub async fn head_blob(&self, name: &str, digest: &str) -> ProxyResult<u64> {
         let (registry_url, image_name) = self.split_registry_and_name(name);
         let url = format!("{}/v2/{}/blobs/{}", registry_url, image_name, digest);
 
         info!("HEAD request for blob: {}", url);
 
-        let response = self
-            .fetch_with_auth(Method::HEAD, &url, None)
-            .await
-            .map_err(|e| format!("Failed to HEAD blob: {}", e))?;
+        let response = self.fetch_with_auth(Method::HEAD, &url, None).await?;
 
         if !response.status().is_success() {
-            return Err(format!("Blob not found: {}", response.status()));
+            return Err(ProxyError::BlobNotFound {
+                status: response.status(),
+            });
         }
 
         let content_length = response
@@ -157,8 +157,37 @@ impl DockerProxy {
         Ok(content_length)
     }
 
-    pub async fn initiate_blob_upload(&self, _name: &str) -> Result<String, String> {
-        Ok(Uuid::new_v4().to_string())
+    pub async fn initiate_blob_upload(&self, _name: &str) -> ProxyResult<String> {
+        Err(ProxyError::BlobUploadNotSupported)
+    }
+
+    /// Check health of the default registry
+    /// Returns true if the registry is reachable and responding
+    pub async fn check_registry_health(&self) -> bool {
+        let url = format!("{}/v2/", self.registry_url);
+
+        match self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                // Registry should return 200 or 401 (401 means it's working but needs auth)
+                let status = resp.status();
+                status.is_success() || status == reqwest::StatusCode::UNAUTHORIZED
+            }
+            Err(e) => {
+                tracing::warn!("Registry health check failed: {}", e);
+                false
+            }
+        }
+    }
+
+    /// Get the default registry URL
+    pub fn get_registry_url(&self) -> &str {
+        &self.registry_url
     }
 
     // Helper: perform request and handle Docker Registry Bearer auth flow (WWW-Authenticate -> token)
@@ -167,7 +196,11 @@ impl DockerProxy {
         method: Method,
         url: &str,
         extra_headers: Option<Vec<(&str, &str)>>,
-    ) -> Result<reqwest::Response, String> {
+    ) -> ProxyResult<reqwest::Response> {
+        // Check if this is a GHCR request and we have a token
+        let is_ghcr = self.is_ghcr_registry(url);
+        let has_ghcr_token = is_ghcr && !self.ghcr_token.is_empty();
+
         // initial request
         let mut req = self.client.request(method.clone(), url);
         if let Some(hs) = &extra_headers {
@@ -176,10 +209,13 @@ impl DockerProxy {
             }
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| format!("request error: {}", e))?;
+        // Add GHCR token to initial request if available
+        if has_ghcr_token {
+            info!("Using GHCR token for authentication");
+            req = req.bearer_auth(&self.ghcr_token);
+        }
+
+        let resp = req.send().await?;
         if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
             return Ok(resp);
         }
@@ -189,12 +225,10 @@ impl DockerProxy {
             .headers()
             .get(reqwest::header::WWW_AUTHENTICATE)
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| "Unauthorized and missing WWW-Authenticate header".to_string())?;
+            .ok_or(ProxyError::MissingAuthHeader)?;
 
         let params = Self::parse_www_authenticate(www);
-        let realm = params
-            .get("realm")
-            .ok_or_else(|| "WWW-Authenticate missing realm".to_string())?;
+        let realm = params.get("realm").ok_or(ProxyError::MissingAuthRealm)?;
 
         // build token request URL
         let mut token_url = realm.clone();
@@ -209,27 +243,31 @@ impl DockerProxy {
 
         info!("Requesting token from: {}", token_url);
 
-        let token_resp = self
-            .client
-            .get(&token_url)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to request token: {}", e))?;
+        // Build token request with GHCR authentication if available
+        let mut token_req = self.client.get(&token_url);
+        if has_ghcr_token {
+            info!("Adding GHCR token to token request");
+            token_req = token_req.bearer_auth(&self.ghcr_token);
+        }
+
+        let token_resp = token_req.send().await?;
 
         if !token_resp.status().is_success() {
-            return Err(format!("Token request failed: {}", token_resp.status()));
+            return Err(ProxyError::TokenRequestFailed {
+                status: token_resp.status(),
+            });
         }
 
         let j: JsonValue = token_resp
             .json()
             .await
-            .map_err(|e| format!("Failed to parse token response: {}", e))?;
+            .map_err(|e| ProxyError::TokenParseFailed(e.to_string()))?;
 
         let token = j
             .get("token")
             .and_then(|v| v.as_str())
             .or_else(|| j.get("access_token").and_then(|v| v.as_str()))
-            .ok_or_else(|| "token not found in token response".to_string())?;
+            .ok_or(ProxyError::TokenNotFound)?;
 
         // retry original request with Authorization
         let mut req2 = self.client.request(method, url).bearer_auth(token);
@@ -239,12 +277,14 @@ impl DockerProxy {
             }
         }
 
-        let resp2 = req2
-            .send()
-            .await
-            .map_err(|e| format!("retry request error: {}", e))?;
+        let resp2 = req2.send().await?;
 
         Ok(resp2)
+    }
+
+    // Check if a URL belongs to GitHub Container Registry
+    fn is_ghcr_registry(&self, url: &str) -> bool {
+        url.contains("ghcr.io")
     }
 
     // If `name` is like "ghcr.io/owner/repo" return ("https://ghcr.io", "owner/repo")
@@ -292,5 +332,225 @@ impl DockerProxy {
         } else {
             format!("library/{}", name)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_ghcr_registry() {
+        let config = Config::from_str(
+            r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[log]
+logFilePath = "/tmp/test.log"
+level = "info"
+
+[proxy]
+default = "docker.io"
+
+[auth]
+ghcr-token = "test_token"
+"#,
+        )
+        .unwrap();
+
+        let proxy = DockerProxy::new(&config);
+
+        assert!(proxy.is_ghcr_registry("https://ghcr.io/v2/test"));
+        assert!(proxy.is_ghcr_registry("https://ghcr.io/owner/repo"));
+        assert!(!proxy.is_ghcr_registry("https://docker.io/v2/test"));
+        assert!(!proxy.is_ghcr_registry("https://registry-1.docker.io/v2/test"));
+    }
+
+    #[test]
+    fn test_split_registry_and_name() {
+        let config = Config::from_str(
+            r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[log]
+logFilePath = "/tmp/test.log"
+level = "info"
+
+[proxy]
+default = "docker.io"
+
+[auth]
+ghcr-token = ""
+"#,
+        )
+        .unwrap();
+
+        let proxy = DockerProxy::new(&config);
+
+        // Test with explicit registry
+        let (registry, name) = proxy.split_registry_and_name("ghcr.io/vansour/docker-proxy");
+        assert_eq!(registry, "https://ghcr.io");
+        assert_eq!(name, "vansour/docker-proxy");
+
+        // Test with docker.io registry
+        let (registry, name) = proxy.split_registry_and_name("docker.io/library/ubuntu");
+        assert_eq!(registry, "https://docker.io");
+        assert_eq!(name, "library/ubuntu");
+
+        // Test without registry (should use default and add library prefix)
+        let (registry, name) = proxy.split_registry_and_name("ubuntu");
+        assert_eq!(registry, "https://docker.io");
+        assert_eq!(name, "library/ubuntu");
+
+        // Test with owner/repo format
+        let (registry, name) = proxy.split_registry_and_name("vansour/myimage");
+        assert_eq!(registry, "https://docker.io");
+        assert_eq!(name, "vansour/myimage");
+    }
+
+    #[test]
+    fn test_normalize_image_name() {
+        let config = Config::from_str(
+            r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[log]
+logFilePath = "/tmp/test.log"
+level = "info"
+
+[proxy]
+default = "docker.io"
+
+[auth]
+ghcr-token = ""
+"#,
+        )
+        .unwrap();
+
+        let proxy = DockerProxy::new(&config);
+
+        // Single name should get library prefix
+        assert_eq!(proxy.normalize_image_name("ubuntu"), "library/ubuntu");
+        assert_eq!(proxy.normalize_image_name("nginx"), "library/nginx");
+
+        // Name with slash should remain unchanged
+        assert_eq!(
+            proxy.normalize_image_name("vansour/docker-proxy"),
+            "vansour/docker-proxy"
+        );
+        assert_eq!(
+            proxy.normalize_image_name("library/ubuntu"),
+            "library/ubuntu"
+        );
+    }
+
+    #[test]
+    fn test_parse_www_authenticate() {
+        // Test standard Docker Hub auth header
+        let header = r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/ubuntu:pull""#;
+        let params = DockerProxy::parse_www_authenticate(header);
+
+        assert_eq!(
+            params.get("realm"),
+            Some(&"https://auth.docker.io/token".to_string())
+        );
+        assert_eq!(
+            params.get("service"),
+            Some(&"registry.docker.io".to_string())
+        );
+        assert_eq!(
+            params.get("scope"),
+            Some(&"repository:library/ubuntu:pull".to_string())
+        );
+
+        // Test GHCR auth header
+        let ghcr_header = r#"Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:vansour/docker-proxy:pull""#;
+        let ghcr_params = DockerProxy::parse_www_authenticate(ghcr_header);
+
+        assert_eq!(
+            ghcr_params.get("realm"),
+            Some(&"https://ghcr.io/token".to_string())
+        );
+        assert_eq!(ghcr_params.get("service"), Some(&"ghcr.io".to_string()));
+    }
+
+    #[test]
+    fn test_get_registry_url() {
+        let config = Config::from_str(
+            r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[log]
+logFilePath = "/tmp/test.log"
+level = "info"
+
+[proxy]
+default = "docker.io"
+
+[auth]
+ghcr-token = ""
+"#,
+        )
+        .unwrap();
+
+        let proxy = DockerProxy::new(&config);
+        assert_eq!(proxy.get_registry_url(), "https://docker.io");
+    }
+
+    #[test]
+    fn test_registry_url_normalization() {
+        // Test with protocol
+        let config1 = Config::from_str(
+            r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[log]
+logFilePath = "/tmp/test.log"
+level = "info"
+
+[proxy]
+default = "https://ghcr.io"
+
+[auth]
+ghcr-token = ""
+"#,
+        )
+        .unwrap();
+
+        let proxy1 = DockerProxy::new(&config1);
+        assert_eq!(proxy1.get_registry_url(), "https://ghcr.io");
+
+        // Test without protocol
+        let config2 = Config::from_str(
+            r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[log]
+logFilePath = "/tmp/test.log"
+level = "info"
+
+[proxy]
+default = "quay.io"
+
+[auth]
+ghcr-token = ""
+"#,
+        )
+        .unwrap();
+
+        let proxy2 = DockerProxy::new(&config2);
+        assert_eq!(proxy2.get_registry_url(), "https://quay.io");
     }
 }
