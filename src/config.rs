@@ -143,10 +143,7 @@ impl Config {
         &self.log.log_file_path
     }
 
-    /// Get the GHCR authentication token
-    pub fn ghcr_token(&self) -> &str {
-        &self.auth.ghcr_token
-    }
+    // ghcr_token is no longer used because proxy does not handle auth
 
     /// Convert to a display string with masked sensitive data
     pub fn to_display_string(&self) -> String {

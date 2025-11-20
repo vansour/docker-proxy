@@ -1,12 +1,12 @@
 use axum::{
+    Router,
     body::Body,
     extract::Request,
     extract::{Path, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, head, post, put},
-    Router,
 };
 use bytes::Bytes;
 use std::sync::Arc;
@@ -209,22 +209,14 @@ async fn debug_blob_info(
     let name = match params.get("name") {
         Some(v) if !v.is_empty() => v.clone(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "missing 'name' query parameter",
-            )
-                .into_response();
+            return (StatusCode::BAD_REQUEST, "missing 'name' query parameter").into_response();
         }
     };
 
     let digest = match params.get("digest") {
         Some(v) if !v.is_empty() => v.clone(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "missing 'digest' query parameter",
-            )
-                .into_response();
+            return (StatusCode::BAD_REQUEST, "missing 'digest' query parameter").into_response();
         }
     };
 
@@ -233,10 +225,7 @@ async fn debug_blob_info(
         .cloned()
         .unwrap_or_else(|| "latest".to_string());
 
-    match proxy
-        .debug_blob_info(&name, &digest, &reference)
-        .await
-    {
+    match proxy.debug_blob_info(&name, &digest, &reference).await {
         Ok((manifest_size, actual_size)) => {
             let body = json!({
                 "name": name,
@@ -356,10 +345,10 @@ async fn get_blob(
                     continue;
                 }
 
-                if let Ok(ax_key) = axum::http::HeaderName::from_bytes(key_str.as_bytes()) {
-                    if let Ok(ax_val) = axum::http::HeaderValue::from_bytes(value.as_bytes()) {
-                        headers.insert(ax_key, ax_val);
-                    }
+                if let Ok(ax_key) = axum::http::HeaderName::from_bytes(key_str.as_bytes())
+                    && let Ok(ax_val) = axum::http::HeaderValue::from_bytes(value.as_bytes())
+                {
+                    headers.insert(ax_key, ax_val);
                 }
             }
 
@@ -371,7 +360,11 @@ async fn get_blob(
         Err(e) => {
             tracing::error!("Error getting blob: {}", e);
             // 对于代理内部错误，返回 502，避免被 Docker 误认为是正常 blob
-            (StatusCode::BAD_GATEWAY, format!("Upstream blob error: {}", e)).into_response()
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Upstream blob error: {}", e),
+            )
+                .into_response()
         }
     }
 }
@@ -530,17 +523,16 @@ async fn serve_static(headers: HeaderMap, Path(file): Path<String>) -> impl Into
     }
 
     // 检查文件扩展名白名单
-    if let Some(ext) = canonical_path.extension() {
-        if let Some(ext_str) = ext.to_str() {
-            if !ALLOWED_EXTENSIONS.contains(&ext_str.to_lowercase().as_str()) {
-                tracing::warn!(
-                    "Blocked access to file with disallowed extension: {}",
-                    canonical_path.display()
-                );
-                return (StatusCode::FORBIDDEN, "Forbidden").into_response();
-            }
-        }
-    } else {
+    if let Some(ext) = canonical_path.extension()
+        && let Some(ext_str) = ext.to_str()
+        && !ALLOWED_EXTENSIONS.contains(&ext_str.to_lowercase().as_str())
+    {
+        tracing::warn!(
+            "Blocked access to file with disallowed extension: {}",
+            canonical_path.display()
+        );
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    } else if canonical_path.extension().is_none() {
         // 没有扩展名的文件也被拒绝（除非是 index.html 等）
         tracing::warn!(
             "Blocked access to file without extension: {}",
@@ -736,7 +728,7 @@ async fn serve_root() -> impl IntoResponse {
 
 // Wildcard dispatch handlers for /v2/*rest to support repository names containing '/'
 async fn v2_get(State(proxy): State<Arc<DockerProxy>>, Path(rest): Path<String>) -> Response {
-    use router::{parse_v2_path, V2Endpoint};
+    use router::{V2Endpoint, parse_v2_path};
 
     match parse_v2_path(&rest) {
         V2Endpoint::Manifest { name, reference } => {
@@ -750,7 +742,7 @@ async fn v2_get(State(proxy): State<Arc<DockerProxy>>, Path(rest): Path<String>)
 }
 
 async fn v2_head(State(proxy): State<Arc<DockerProxy>>, Path(rest): Path<String>) -> Response {
-    use router::{parse_v2_path, V2Endpoint};
+    use router::{V2Endpoint, parse_v2_path};
 
     match parse_v2_path(&rest) {
         V2Endpoint::Manifest { name, reference } => {
@@ -764,7 +756,7 @@ async fn v2_head(State(proxy): State<Arc<DockerProxy>>, Path(rest): Path<String>
 }
 
 async fn v2_post(State(proxy): State<Arc<DockerProxy>>, Path(rest): Path<String>) -> Response {
-    use router::{parse_v2_path, V2Endpoint};
+    use router::{V2Endpoint, parse_v2_path};
 
     match parse_v2_path(&rest) {
         V2Endpoint::BlobUploadInit { name } => initiate_blob_upload(State(proxy), Path(name)).await,
@@ -773,7 +765,7 @@ async fn v2_post(State(proxy): State<Arc<DockerProxy>>, Path(rest): Path<String>
 }
 
 async fn v2_put(State(_proxy): State<Arc<DockerProxy>>, Path(rest): Path<String>) -> Response {
-    use router::{parse_v2_path, V2Endpoint};
+    use router::{V2Endpoint, parse_v2_path};
 
     match parse_v2_path(&rest) {
         V2Endpoint::BlobUploadComplete { .. } => complete_blob_upload().await.into_response(),

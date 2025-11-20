@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -13,10 +13,10 @@ pub fn init_logger(
     log_level: &str,
 ) -> Result<Option<WorkerGuard>, Box<dyn std::error::Error>> {
     // Create log directory if it doesn't exist
-    if let Some(parent) = Path::new(log_file_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = Path::new(log_file_path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
     }
 
     // Parse log level

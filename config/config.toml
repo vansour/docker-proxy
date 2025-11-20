@@ -8,6 +8,3 @@ level = "info" # debug, info, warn, error
 
 [proxy]
 default = "registry-1.docker.io" #registry-1.docker.io, ghcr.io ...
-
-[auth]
-ghcr-token = ""

@@ -12,21 +12,6 @@ pub enum ProxyError {
     #[error("Blob not found: {status}")]
     BlobNotFound { status: reqwest::StatusCode },
 
-    #[error("Unauthorized: missing WWW-Authenticate header")]
-    MissingAuthHeader,
-
-    #[error("WWW-Authenticate header missing realm")]
-    MissingAuthRealm,
-
-    #[error("Token request failed: {status}")]
-    TokenRequestFailed { status: reqwest::StatusCode },
-
-    #[error("Failed to parse token response: {0}")]
-    TokenParseFailed(String),
-
-    #[error("Token not found in response")]
-    TokenNotFound,
-
     #[error("Failed to read response body: {0}")]
     ResponseReadError(String),
 

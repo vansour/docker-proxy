@@ -24,12 +24,12 @@ pub fn parse_v2_path(rest: &str) -> V2Endpoint {
     let parts: Vec<&str> = rest.split('/').collect();
 
     // Check for manifests endpoint: .../manifests/{reference}
-    if let Some(i) = parts.iter().position(|&p| p == "manifests") {
-        if i + 1 < parts.len() {
-            let name = parts[..i].join("/");
-            let reference = parts[i + 1].to_string();
-            return V2Endpoint::Manifest { name, reference };
-        }
+    if let Some(i) = parts.iter().position(|&p| p == "manifests")
+        && i + 1 < parts.len()
+    {
+        let name = parts[..i].join("/");
+        let reference = parts[i + 1].to_string();
+        return V2Endpoint::Manifest { name, reference };
     }
 
     // Check for blobs endpoint: .../blobs/{digest}

@@ -1,5 +1,5 @@
 /// Range request support for HTTP partial content delivery
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use std::ops::Range;
 
 /// Parse HTTP Range header
