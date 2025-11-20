@@ -50,16 +50,16 @@ async fn main() {
         // 调试：查看 manifest size vs 实际 blob 大小
         .route("/debug/blob-info", get(debug_blob_info))
         // static web files served at root (handler below). API routes (/v2/*) are registered earlier.
-        .route("/*file", get(serve_static))
+        .route("/{*file}", get(serve_static))
         // serve web UI at root without redirect
         .route("/", get(serve_root))
         // Docker Registry V2 API endpoints
         .route("/v2/", get(handle_v2_check))
         // wildcard dispatch for repository names that may contain slashes (e.g. ghcr.io/owner/repo)
-        .route("/v2/*rest", get(v2_get))
-        .route("/v2/*rest", head(v2_head))
-        .route("/v2/*rest", post(v2_post))
-        .route("/v2/*rest", put(v2_put))
+        .route("/v2/{*rest}", get(v2_get))
+        .route("/v2/{*rest}", head(v2_head))
+        .route("/v2/{*rest}", post(v2_post))
+        .route("/v2/{*rest}", put(v2_put))
         .layer(middleware::from_fn(log_middleware))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
