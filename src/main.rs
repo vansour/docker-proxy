@@ -261,26 +261,39 @@ async fn head_manifest(
     }
 }
 
-// 获取 blob
+// 获取 blob：完全透传上游响应（包括头和流式 body）
 async fn get_blob(
     State(proxy): State<Arc<DockerProxy>>,
     Path((name, digest)): Path<(String, String)>,
 ) -> impl IntoResponse {
     match proxy.get_blob(&name, &digest).await {
-        Ok(body) => {
+        Ok(upstream_resp) => {
+            // 将 reqwest::Response 拆成头和 body 流，并适配到 axum 类型
+            let status = axum::http::StatusCode::from_u16(upstream_resp.status().as_u16())
+                .unwrap_or(StatusCode::OK);
             let mut headers = HeaderMap::new();
-            if let Ok(ct_value) = "application/octet-stream".parse() {
-                headers.insert(header::CONTENT_TYPE, ct_value);
-            } else {
-                tracing::error!("Failed to parse application/octet-stream header");
+
+            for (key, value) in upstream_resp.headers().iter() {
+                let key_str = key.as_str();
+                // 过滤掉 hop-by-hop 头
+                if key_str.eq_ignore_ascii_case("connection")
+                    || key_str.eq_ignore_ascii_case("transfer-encoding")
+                    || key_str.eq_ignore_ascii_case("upgrade")
+                {
+                    continue;
+                }
+
+                if let Ok(ax_key) = axum::http::HeaderName::from_bytes(key_str.as_bytes()) {
+                    if let Ok(ax_val) = axum::http::HeaderValue::from_bytes(value.as_bytes()) {
+                        headers.insert(ax_key, ax_val);
+                    }
+                }
             }
 
-            if let Ok(cl_value) = body.len().to_string().parse() {
-                headers.insert(header::CONTENT_LENGTH, cl_value);
-            } else {
-                tracing::warn!("Failed to parse content length: {}", body.len());
-            }
-            (StatusCode::OK, headers, body).into_response()
+            let stream = upstream_resp.bytes_stream();
+            let body = Body::from_stream(stream);
+
+            (status, headers, body).into_response()
         }
         Err(e) => {
             tracing::error!("Error getting blob: {}", e);

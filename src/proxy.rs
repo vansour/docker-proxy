@@ -1,6 +1,5 @@
 use crate::config::Config;
 use crate::error::{ProxyError, ProxyResult};
-use bytes::Bytes;
 use reqwest::Method;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -18,8 +17,20 @@ impl DockerProxy {
             registry_url = format!("https://{}", registry_url);
         }
 
+        // Build client with automatic decompression disabled
+        // This is critical for blob proxying to preserve the exact bytes and Content-Length
+        let client = reqwest::Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .build()
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to build custom client, using default: {}", e);
+                reqwest::Client::new()
+            });
+
         Self {
-            client: reqwest::Client::new(),
+            client,
             registry_url,
             ghcr_token: config.ghcr_token().to_string(),
         }
@@ -120,7 +131,7 @@ impl DockerProxy {
         Ok((content_type, content_length))
     }
 
-    pub async fn get_blob(&self, name: &str, digest: &str) -> ProxyResult<Bytes> {
+    pub async fn get_blob(&self, name: &str, digest: &str) -> ProxyResult<reqwest::Response> {
         let (registry_url, image_name) = self.split_registry_and_name(name);
         let url = format!("{}/v2/{}/blobs/{}", registry_url, image_name, digest);
 
@@ -139,12 +150,8 @@ impl DockerProxy {
             });
         }
 
-        let body = response
-            .bytes()
-            .await
-            .map_err(|e| ProxyError::ResponseReadError(e.to_string()))?;
-
-        Ok(body)
+        // 直接返回上游响应，由上层负责流式转发
+        Ok(response)
     }
 
     pub async fn head_blob(&self, name: &str, digest: &str) -> ProxyResult<u64> {
