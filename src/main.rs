@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     extract::Request,
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, head, post, put},
@@ -11,6 +11,7 @@ use axum::{
 use bytes::Bytes;
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -18,6 +19,7 @@ mod config;
 mod error;
 mod log;
 mod proxy;
+mod range;
 mod router;
 
 use config::Config;
@@ -57,6 +59,7 @@ async fn main() {
         .route("/v2/*rest", post(v2_post))
         .route("/v2/*rest", put(v2_put))
         .layer(middleware::from_fn(log_middleware))
+        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(proxy);
 
@@ -72,11 +75,21 @@ async fn main() {
     axum::serve(listener, app).await.expect("Server error");
 }
 
-// 日志中间件：记录请求、响应状态码和耗时
+// 日志中间件：记录请求、响应状态码和耗时（结构化日志）
 async fn log_middleware(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
+    let request_id = uuid::Uuid::new_v4();
     let start = std::time::Instant::now();
+
+    // 获取客户端 IP（从 X-Forwarded-For 或连接地址）
+    let client_ip = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
 
     // 处理请求
     let response = next.run(request).await;
@@ -84,31 +97,38 @@ async fn log_middleware(request: Request, next: Next) -> Response {
     // 计算耗时
     let elapsed = start.elapsed();
     let status = response.status();
+    let duration_ms = elapsed.as_secs_f64() * 1000.0;
 
-    // 根据状态码选择日志级别
+    // 根据状态码选择日志级别，使用结构化字段
     if status.is_server_error() {
         tracing::error!(
-            "{} {} - {} - {:.2}ms",
-            method,
-            uri,
-            status.as_u16(),
-            elapsed.as_secs_f64() * 1000.0
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = status.as_u16(),
+            duration_ms = format!("{:.2}", duration_ms),
+            client_ip = %client_ip,
+            "Request completed with server error"
         );
     } else if status.is_client_error() {
         tracing::warn!(
-            "{} {} - {} - {:.2}ms",
-            method,
-            uri,
-            status.as_u16(),
-            elapsed.as_secs_f64() * 1000.0
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = status.as_u16(),
+            duration_ms = format!("{:.2}", duration_ms),
+            client_ip = %client_ip,
+            "Request completed with client error"
         );
     } else {
         tracing::info!(
-            "{} {} - {} - {:.2}ms",
-            method,
-            uri,
-            status.as_u16(),
-            elapsed.as_secs_f64() * 1000.0
+            request_id = %request_id,
+            method = %method,
+            uri = %uri,
+            status = status.as_u16(),
+            duration_ms = format!("{:.2}", duration_ms),
+            client_ip = %client_ip,
+            "Request completed successfully"
         );
     }
 
@@ -118,10 +138,11 @@ async fn log_middleware(request: Request, next: Next) -> Response {
 // 验证Docker Registry V2 API
 async fn handle_v2_check() -> impl IntoResponse {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        "Docker-Distribution-Api-Version",
-        "registry/2.0".parse().unwrap(),
-    );
+    if let Ok(value) = "registry/2.0".parse() {
+        headers.insert("Docker-Distribution-Api-Version", value);
+    } else {
+        tracing::error!("Failed to parse Docker-Distribution-Api-Version header value");
+    }
     (StatusCode::OK, headers)
 }
 
@@ -151,7 +172,10 @@ async fn healthz(State(proxy): State<Arc<DockerProxy>>) -> impl IntoResponse {
     // 构建响应 JSON
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_else(|e| {
+            tracing::warn!("System time error, using 0: {}", e);
+            std::time::Duration::from_secs(0)
+        })
         .as_secs();
 
     let response = json!({
@@ -179,12 +203,14 @@ async fn get_manifest(
     match proxy.get_manifest(&name, &reference).await {
         Ok((content_type, body)) => {
             let mut headers = HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                content_type
-                    .parse()
-                    .unwrap_or("application/json".parse().unwrap()),
-            );
+            let ct_value = content_type
+                .parse()
+                .or_else(|_| "application/json".parse())
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to parse content type '{}': {}", content_type, e);
+                    HeaderValue::from_static("application/json")
+                });
+            headers.insert(header::CONTENT_TYPE, ct_value);
             (StatusCode::OK, headers, body).into_response()
         }
         Err(e) => {
@@ -207,16 +233,20 @@ async fn head_manifest(
     match proxy.head_manifest(&name, &reference).await {
         Ok((content_type, content_length)) => {
             let mut headers = HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                content_type
-                    .parse()
-                    .unwrap_or("application/json".parse().unwrap()),
-            );
-            headers.insert(
-                header::CONTENT_LENGTH,
-                content_length.to_string().parse().unwrap(),
-            );
+            let ct_value = content_type
+                .parse()
+                .or_else(|_| "application/json".parse())
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to parse content type '{}': {}", content_type, e);
+                    HeaderValue::from_static("application/json")
+                });
+            headers.insert(header::CONTENT_TYPE, ct_value);
+
+            if let Ok(cl_value) = content_length.to_string().parse() {
+                headers.insert(header::CONTENT_LENGTH, cl_value);
+            } else {
+                tracing::warn!("Failed to parse content length: {}", content_length);
+            }
             (StatusCode::OK, headers).into_response()
         }
         Err(e) => {
@@ -239,14 +269,17 @@ async fn get_blob(
     match proxy.get_blob(&name, &digest).await {
         Ok(body) => {
             let mut headers = HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                "application/octet-stream".parse().unwrap(),
-            );
-            headers.insert(
-                header::CONTENT_LENGTH,
-                body.len().to_string().parse().unwrap(),
-            );
+            if let Ok(ct_value) = "application/octet-stream".parse() {
+                headers.insert(header::CONTENT_TYPE, ct_value);
+            } else {
+                tracing::error!("Failed to parse application/octet-stream header");
+            }
+
+            if let Ok(cl_value) = body.len().to_string().parse() {
+                headers.insert(header::CONTENT_LENGTH, cl_value);
+            } else {
+                tracing::warn!("Failed to parse content length: {}", body.len());
+            }
             (StatusCode::OK, headers, body).into_response()
         }
         Err(e) => {
@@ -296,7 +329,11 @@ async fn initiate_blob_upload(
         Ok(upload_id) => {
             let mut headers = HeaderMap::new();
             let location = format!("/v2/{}/blobs/uploads/{}", name, upload_id);
-            headers.insert(header::LOCATION, location.parse().unwrap());
+            if let Ok(loc_value) = location.parse() {
+                headers.insert(header::LOCATION, loc_value);
+            } else {
+                tracing::warn!("Failed to parse location header: {}", location);
+            }
             (StatusCode::ACCEPTED, headers).into_response()
         }
         Err(e) => {
@@ -357,8 +394,8 @@ fn get_content_type(path: &str) -> &'static str {
     }
 }
 
-// 安全的静态文件服务：使用 canonicalize 和白名单防止路径穿越，支持流式传输
-async fn serve_static(Path(file): Path<String>) -> impl IntoResponse {
+// 安全的静态文件服务：使用 canonicalize 和白名单防止路径穿越，支持流式传输和 Range 请求
+async fn serve_static(headers: HeaderMap, Path(file): Path<String>) -> impl IntoResponse {
     use std::path::PathBuf;
 
     // 白名单：只允许这些文件扩展名
@@ -444,14 +481,45 @@ async fn serve_static(Path(file): Path<String>) -> impl IntoResponse {
     // 根据文件扩展名确定 Content-Type
     let ctype = get_content_type(&requested_path);
 
-    // 构建响应头
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, ctype.parse().unwrap());
-    headers.insert(
-        header::CONTENT_LENGTH,
-        file_size.to_string().parse().unwrap(),
-    );
-    headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+    // 检查是否是 Range 请求
+    let range_request = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| range::parse_range_header(s, file_size));
+
+    // 如果是 Range 请求，返回部分内容
+    if let Some(range) = range_request {
+        return serve_range(&canonical_path, range, file_size, ctype, &requested_path).await;
+    }
+
+    // 构建响应头（完整文件）
+    let mut response_headers = HeaderMap::new();
+    if let Ok(ct_value) = ctype.parse() {
+        response_headers.insert(header::CONTENT_TYPE, ct_value);
+    } else {
+        tracing::warn!("Failed to parse content type '{}', using default", ctype);
+        response_headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+    }
+
+    if let Ok(cl_value) = file_size.to_string().parse() {
+        response_headers.insert(header::CONTENT_LENGTH, cl_value);
+    } else {
+        tracing::warn!("Failed to parse content length: {}", file_size);
+    }
+
+    if let Ok(nosniff_value) = "nosniff".parse() {
+        response_headers.insert("X-Content-Type-Options", nosniff_value);
+    } else {
+        tracing::warn!("Failed to parse X-Content-Type-Options header");
+    }
+
+    // 添加 Accept-Ranges header 表示支持 Range 请求
+    if let Ok(ar_value) = "bytes".parse() {
+        response_headers.insert(header::ACCEPT_RANGES, ar_value);
+    }
 
     // 性能优化：根据文件大小选择不同的传输策略
     // - 小文件（< 1MB）：直接读取到内存，减少系统调用开销
@@ -465,12 +533,12 @@ async fn serve_static(Path(file): Path<String>) -> impl IntoResponse {
         match tokio::fs::read(&canonical_path).await {
             Ok(bytes) => {
                 tracing::debug!(
-                    "Serving small file ({}KB) from memory: {}",
-                    file_size / 1024,
-                    requested_path
+                    file_path = %requested_path,
+                    file_size_kb = file_size / 1024,
+                    "Serving small file from memory"
                 );
                 let content = Bytes::from(bytes);
-                (StatusCode::OK, headers, content).into_response()
+                (StatusCode::OK, response_headers, content).into_response()
             }
             Err(e) => {
                 tracing::error!("File read error: {}", e);
@@ -484,19 +552,77 @@ async fn serve_static(Path(file): Path<String>) -> impl IntoResponse {
         match tokio::fs::File::open(&canonical_path).await {
             Ok(file) => {
                 tracing::debug!(
-                    "Serving large file ({}MB) via streaming: {}",
-                    file_size / (1024 * 1024),
-                    requested_path
+                    file_path = %requested_path,
+                    file_size_mb = file_size / (1024 * 1024),
+                    "Serving large file via streaming"
                 );
                 // 创建异步流式读取器，按需读取文件内容
                 let stream = ReaderStream::new(file);
                 let body = Body::from_stream(stream);
-                (StatusCode::OK, headers, body).into_response()
+                (StatusCode::OK, response_headers, body).into_response()
             }
             Err(e) => {
                 tracing::error!("File open error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
             }
+        }
+    }
+}
+
+// 处理 Range 请求，返回部分内容
+async fn serve_range(
+    file_path: &std::path::Path,
+    range: std::ops::Range<u64>,
+    file_size: u64,
+    content_type: &str,
+    requested_path: &str,
+) -> Response {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    // 创建 Range 响应头
+    let (status, headers) = match range::create_range_headers(&range, file_size, content_type) {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::error!("Failed to create range headers");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response();
+        }
+    };
+
+    // 打开文件并定位到 range 起始位置
+    let mut file = match tokio::fs::File::open(file_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!("Failed to open file for range request: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response();
+        }
+    };
+
+    // Seek 到起始位置
+    if let Err(e) = file.seek(std::io::SeekFrom::Start(range.start)).await {
+        tracing::error!("Failed to seek file: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response();
+    }
+
+    let range_length = range.end - range.start;
+
+    tracing::debug!(
+        file_path = %requested_path,
+        range_start = range.start,
+        range_end = range.end,
+        range_length = range_length,
+        "Serving range request"
+    );
+
+    // 读取指定范围的数据
+    let mut buffer = vec![0u8; range_length as usize];
+    match file.read_exact(&mut buffer).await {
+        Ok(_) => {
+            let content = Bytes::from(buffer);
+            (status, headers, content).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to read range from file: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
         }
     }
 }
@@ -508,14 +634,18 @@ async fn serve_root() -> impl IntoResponse {
         Ok(bytes) => {
             let content = Bytes::from(bytes);
             let mut headers = HeaderMap::new();
-            headers.insert(
-                header::CONTENT_TYPE,
-                "text/html; charset=utf-8".parse().unwrap(),
-            );
-            headers.insert(
-                header::CONTENT_LENGTH,
-                content.len().to_string().parse().unwrap(),
-            );
+            if let Ok(ct_value) = "text/html; charset=utf-8".parse() {
+                headers.insert(header::CONTENT_TYPE, ct_value);
+            } else {
+                tracing::error!("Failed to parse HTML content type header");
+                headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
+            }
+
+            if let Ok(cl_value) = content.len().to_string().parse() {
+                headers.insert(header::CONTENT_LENGTH, cl_value);
+            } else {
+                tracing::warn!("Failed to parse content length: {}", content.len());
+            }
             (StatusCode::OK, headers, content).into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, "Not Found").into_response(),

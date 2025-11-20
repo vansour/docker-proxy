@@ -4,7 +4,6 @@ use bytes::Bytes;
 use reqwest::Method;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use tracing::info;
 
 pub struct DockerProxy {
     client: reqwest::Client,
@@ -31,7 +30,12 @@ impl DockerProxy {
         let (registry_url, image_name) = self.split_registry_and_name(name);
         let url = format!("{}/v2/{}/manifests/{}", registry_url, image_name, reference);
 
-        info!("Fetching manifest from: {}", url);
+        tracing::info!(
+            registry = %registry_url,
+            image = %image_name,
+            reference = %reference,
+            "Fetching manifest"
+        );
 
         let response = self
             .fetch_with_auth(
@@ -75,7 +79,12 @@ impl DockerProxy {
         let (registry_url, image_name) = self.split_registry_and_name(name);
         let url = format!("{}/v2/{}/manifests/{}", registry_url, image_name, reference);
 
-        info!("HEAD request for manifest: {}", url);
+        tracing::info!(
+            registry = %registry_url,
+            image = %image_name,
+            reference = %reference,
+            "HEAD request for manifest"
+        );
 
         let response = self
             .fetch_with_auth(
@@ -115,7 +124,12 @@ impl DockerProxy {
         let (registry_url, image_name) = self.split_registry_and_name(name);
         let url = format!("{}/v2/{}/blobs/{}", registry_url, image_name, digest);
 
-        info!("Fetching blob from: {}", url);
+        tracing::info!(
+            registry = %registry_url,
+            image = %image_name,
+            digest = %digest,
+            "Fetching blob"
+        );
 
         let response = self.fetch_with_auth(Method::GET, &url, None).await?;
 
@@ -137,7 +151,12 @@ impl DockerProxy {
         let (registry_url, image_name) = self.split_registry_and_name(name);
         let url = format!("{}/v2/{}/blobs/{}", registry_url, image_name, digest);
 
-        info!("HEAD request for blob: {}", url);
+        tracing::info!(
+            registry = %registry_url,
+            image = %image_name,
+            digest = %digest,
+            "HEAD request for blob"
+        );
 
         let response = self.fetch_with_auth(Method::HEAD, &url, None).await?;
 
@@ -211,7 +230,7 @@ impl DockerProxy {
 
         // Add GHCR token to initial request if available
         if has_ghcr_token {
-            info!("Using GHCR token for authentication");
+            tracing::debug!("Using GHCR token for initial request");
             req = req.bearer_auth(&self.ghcr_token);
         }
 
@@ -241,12 +260,16 @@ impl DockerProxy {
             token_url.push_str(&format!("scope={}", scope));
         }
 
-        info!("Requesting token from: {}", token_url);
+        tracing::info!(
+            token_url = %token_url,
+            has_auth = has_ghcr_token,
+            "Requesting authentication token"
+        );
 
         // Build token request with GHCR authentication if available
         let mut token_req = self.client.get(&token_url);
         if has_ghcr_token {
-            info!("Adding GHCR token to token request");
+            tracing::debug!("Using GHCR token for authentication");
             token_req = token_req.bearer_auth(&self.ghcr_token);
         }
 
@@ -358,7 +381,7 @@ default = "docker.io"
 ghcr-token = "test_token"
 "#,
         )
-        .unwrap();
+        .expect("Failed to parse test config");
 
         let proxy = DockerProxy::new(&config);
 
@@ -387,7 +410,7 @@ default = "docker.io"
 ghcr-token = ""
 "#,
         )
-        .unwrap();
+        .expect("Failed to parse test config");
 
         let proxy = DockerProxy::new(&config);
 
@@ -431,7 +454,7 @@ default = "docker.io"
 ghcr-token = ""
 "#,
         )
-        .unwrap();
+        .expect("Failed to parse test config");
 
         let proxy = DockerProxy::new(&config);
 
@@ -499,7 +522,7 @@ default = "docker.io"
 ghcr-token = ""
 "#,
         )
-        .unwrap();
+        .expect("Failed to parse test config");
 
         let proxy = DockerProxy::new(&config);
         assert_eq!(proxy.get_registry_url(), "https://docker.io");
@@ -525,7 +548,7 @@ default = "https://ghcr.io"
 ghcr-token = ""
 "#,
         )
-        .unwrap();
+        .expect("Failed to parse test config with protocol");
 
         let proxy1 = DockerProxy::new(&config1);
         assert_eq!(proxy1.get_registry_url(), "https://ghcr.io");
@@ -548,7 +571,7 @@ default = "quay.io"
 ghcr-token = ""
 "#,
         )
-        .unwrap();
+        .expect("Failed to parse test config without protocol");
 
         let proxy2 = DockerProxy::new(&config2);
         assert_eq!(proxy2.get_registry_url(), "https://quay.io");
